@@ -50,12 +50,13 @@ try:
 except Exception:
     st.warning("⚠️ APIキーが設定されていません。")
 
-# 選択肢リスト（「その他」は最後に配置し、優先度を下げる）
+# 選択肢リスト
+# 「資料」と「その他」を最後に配置し、AIの優先度を下げる
 VALID_CATEGORIES = [
   "答申･報告･調査結果", "事業、計画", "会議等", "募集", "ｲﾍﾞﾝﾄ･講演", "事件･事故･処分",
-  "動物", "人事･訃報･表彰", "資料", "ｺﾒﾝﾄ･声明･談話", "選挙関係", "入試関係",
+  "動物", "人事･訃報･表彰", "ｺﾒﾝﾄ･声明･談話", "選挙関係", "入試関係",
   "広報紙・ﾊﾟﾝﾌﾚｯﾄ・定期刊行物", "統計", "議会", "報道官", "取材案内",
-  "デフリンピック・世界陸上", "災害関係", "その他"
+  "デフリンピック・世界陸上", "災害関係", "資料", "その他"
 ]
 
 # 学習データ
@@ -924,23 +925,19 @@ def force_category_match(text):
     """
     AIの回答を有効なカテゴリに強力に紐づける
     """
-    # 1. 完全一致
     if text in VALID_CATEGORIES:
         return text
     
-    # 2. 部分一致（AIの回答の中にリストの言葉が含まれているか）
     for cat in VALID_CATEGORIES:
         if cat in text:
             return cat
             
-    # 3. 逆方向の部分一致
     for cat in VALID_CATEGORIES:
         simple_cat = cat.replace("･", "").replace("・", "").replace("、", "")
         simple_text = text.replace("･", "").replace("・", "").replace("、", "")
         if simple_text in simple_cat and len(simple_text) > 1:
             return cat
 
-    # 4. それでもダメなら元のテキストを返す（無理に「その他」にはしない）
     return text
 
 def safe_call_gemini(model, title, bureau):
@@ -961,9 +958,9 @@ def safe_call_gemini(model, title, bureau):
     {TRAINING_EXAMPLES}
 
     CRITICAL INSTRUCTIONS:
-    1. **DO NOT CHOOSE "その他" (Other).** You must forcefully categorize it into one of the specific categories (e.g., "事業、計画", "資料", "ｲﾍﾞﾝﾄ･講演") even if the match is weak.
-    2. Only use "その他" if the title is complete gibberish or empty.
-    3. Analyze the semantic meaning of the title carefully.
+    1. **Avoid "その他" (Others) and "資料" (Materials) as much as possible.**
+    2. Even if the match is weak, try to force it into specific categories like "事業、計画" (Projects/Plans) or "イベント・講演".
+    3. **If you are unsure, default to "事業、計画".** This is the safest guess.
     4. Output ONLY the JSON object.
 
     Output Schema:
@@ -984,7 +981,6 @@ def safe_call_gemini(model, title, bureau):
             except:
                 raw_category = response.text
 
-            # 強制マッチング
             final_category = force_category_match(raw_category)
             
             # リストにない言葉ならリトライ
@@ -1000,9 +996,8 @@ def safe_call_gemini(model, title, bureau):
                     continue
             print(f"API Error ({attempt}): {e}")
             
-    # 全て失敗した場合でも「その他」ではなく「資料」（無難なもの）にするなど調整可能ですが
-    # ここでは最後の手段として空文字または推論結果をそのまま返します
-    return "資料" # 最終手段として「資料」などをデフォルトにするのも手です
+    # 全て失敗した場合のデフォルト値（ご要望通り「事業、計画」に変更）
+    return "事業、計画"
 
 # --- メイン処理 ---
 
@@ -1037,7 +1032,6 @@ if uploaded_files:
             
             progress_bar.progress((i + 1) / len(new_files))
             
-            # 精度優先のため待機時間は維持
             time.sleep(1.5)
         
         status_text.text("抽出完了！")
