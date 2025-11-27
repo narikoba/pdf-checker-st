@@ -8,7 +8,7 @@ import random
 # ページ設定
 st.set_page_config(page_title="タテ表効率化くん", layout="wide")
 
-# CSS: ドラッグ＆ドロップエリア
+# CSS
 st.markdown("""
 <style>
     div[data-testid="stFileUploader"] section {
@@ -31,29 +31,24 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# セッション状態の初期化
 if "results" not in st.session_state:
     st.session_state.results = []
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 
-# タイトル
 st.title("📄 タテ表効率化くん")
 
-# リセットボタン
 if st.button("🗑️ 結果をリセットする"):
     st.session_state.results = []
     st.session_state.processed_files = set()
     st.rerun()
 
-# APIキーの取得
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
 except Exception:
     st.warning("⚠️ APIキーが設定されていません。")
 
-# 定数リスト
 VALID_BUREAUS = [
   "政策企画局", "子供政策連携室", "総務局", "財務局", "デジタルサービス局", "主税局", "生活文化局", 
   "都民安全総合対策本部", "スポーツ推進本部", "都市整備局", "住宅政策本部", "環境局", "福祉局", 
@@ -69,9 +64,7 @@ VALID_CATEGORIES = [
   "デフリンピック・世界陸上", "その他", "災害関係"
 ]
 
-# ==========================================
-#  【重要】学習データ定義
-# ==========================================
+# 学習データ
 TRAINING_EXAMPLES = """
 取材案内	（取材案内） 高円宮妃殿下「第40回東京都障害者総合美術展」お成りについて	福祉局
 取材案内	（取材案内）環境に配慮した都市農業とエシカル消費について考える「TOKYO農業フォーラム2025」の開催について	産業労働局
@@ -926,55 +919,29 @@ TRAINING_EXAMPLES = """
 ｲﾍﾞﾝﾄ･講演	 令和7年度「障害者週間」記念の集い第45回ふれあいフェスティバル	福祉局
 """
 
-# ==========================================
-#  関数定義
-# ==========================================
-
 def parse_filename_info(filename):
-    """
-    ファイル名から「局名」と「件名」を機械的に抽出する関数
-    """
-    # 局名の抽出
     bureau_match = re.match(r'^【([^】]+)】', filename)
-    if bureau_match:
-        bureau = bureau_match.group(1)
-    else:
-        bureau = ""
-
-    # 件名の抽出
+    bureau = bureau_match.group(1) if bureau_match else ""
     title = re.sub(r'^【[^】]+】', '', filename)
-    title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE)
-    title = title.strip()
-    
+    title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE).strip()
     return bureau, title
 
 def call_gemini_simple(model, title, bureau):
-    """
-    【変更点】JSONではなく「区分名のみ」をテキストで返させる関数
-    これにより解析エラーを根絶します。
-    """
     prompt = f"""
-    あなたは東京都の文書分類システムです。
-    以下の「件名」と「局名」から、最も適切な「区分」を1つだけ選んで答えてください。
+    文書の件名から、最も適切な「区分」を1つ選んでください。
 
     件名: {title}
     局名: {bureau}
 
-    【選択肢リスト】
+    【選択肢】
     {', '.join(VALID_CATEGORIES)}
 
-    【判断基準（学習データ）】
+    【学習データ】
     {TRAINING_EXAMPLES}
 
-    【重要】
-    ・余計な挨拶や説明は一切不要です。
-    ・JSON形式にする必要はありません。
-    ・「選択肢リスト」にある言葉をそのまま一つだけ返してください。
-    
-    回答:
+    回答は選択肢の中の言葉（例：「事業、計画」）のみを返してください。余計な文字は不要です。
     """
     
-    # リトライ処理（最大3回、待機時間を増やしながら）
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -982,27 +949,38 @@ def call_gemini_simple(model, title, bureau):
             return response.text.strip()
         except Exception as e:
             if attempt < max_retries - 1:
-                # エラー時は少し待って再挑戦 (2秒, 4秒...)
                 time.sleep(2 * (attempt + 1))
                 continue
             else:
-                raise e # 3回ダメならエラーを投げる
+                raise e
 
-# ==========================================
-#  メイン処理
-# ==========================================
+def extract_valid_category(text):
+    """
+    【最強クリーニング関数】
+    AIの回答テキストの中に、有効なカテゴリ名が含まれているか総当たりで探す。
+    見つかればそれを返す。見つからなければ元のテキスト（または不明）を返す。
+    """
+    # 改行や空白を削除して1行にする
+    clean_text = text.replace("\n", "").replace(" ", "").replace("　", "")
+    
+    # 優先順位: 完全一致 -> 部分一致
+    for cat in VALID_CATEGORIES:
+        if cat == clean_text:
+            return cat
+            
+    # 部分一致（「回答は事業、計画です」みたいな場合）
+    for cat in VALID_CATEGORIES:
+        if cat in text:
+            return cat
+            
+    return "不明" # どうしても見つからない場合
 
-uploaded_files = st.file_uploader(
-    " ", 
-    type="pdf", 
-    accept_multiple_files=True,
-    key="file_uploader"
-)
+# --- メイン処理 ---
+
+uploaded_files = st.file_uploader(" ", type="pdf", accept_multiple_files=True, key="file_uploader")
 
 if uploaded_files:
-    # モデル設定（gemini-2.5-flash-lite）
     model = genai.GenerativeModel("gemini-2.5-flash-lite")
-    
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
     
     if new_files:
@@ -1013,25 +991,14 @@ if uploaded_files:
             status_text.text(f"処理中 ({i+1}/{len(new_files)}): {file.name}")
             
             try:
-                # 1. 局名・件名抽出（Python処理）
                 bureau, title = parse_filename_info(file.name)
                 
-                # 2. AI推論（テキストのみ送信・JSON不使用）
-                category_raw = call_gemini_simple(model, title, bureau)
+                # AI推論
+                ai_response = call_gemini_simple(model, title, bureau)
                 
-                # 3. カテゴリのクリーニング（改行や余計な文字の削除）
-                # 選択肢リストに含まれているかチェックし、含まれていれば採用
-                final_category = "不明"
-                for valid_cat in VALID_CATEGORIES:
-                    if valid_cat in category_raw:
-                        final_category = valid_cat
-                        break
+                # 【ここが重要】AIの回答から有効なカテゴリだけを抽出する
+                final_category = extract_valid_category(ai_response)
                 
-                # もしリストになくても、AIが自信を持って答えた短い言葉ならそのまま採用
-                if final_category == "不明" and len(category_raw) < 20:
-                     final_category = category_raw
-
-                # 4. 結果保存
                 result_entry = {
                     "fileName": file.name,
                     "bureau": bureau,
@@ -1043,33 +1010,29 @@ if uploaded_files:
                 st.session_state.processed_files.add(file.file_id)
                 
             except Exception as e:
+                # エラーが出ても止まらず、とりあえず「Error」として記録
                 print(f"Error processing {file.name}: {e}")
                 error_entry = {
                     "fileName": file.name,
                     "bureau": bureau if 'bureau' in locals() else "",
                     "title": title if 'title' in locals() else file.name,
-                    "category": "Error" # ここでもしエラーが出たら本当に通信エラー等
+                    "category": "Error"
                 }
                 st.session_state.results.append(error_entry)
                 st.session_state.processed_files.add(file.file_id)
             
             progress_bar.progress((i + 1) / len(new_files))
-            
-            # 【重要】安定性確保のため1秒待機（これでエラー率は激減します）
             time.sleep(1.0)
         
         status_text.text("抽出完了！")
         progress_bar.empty()
 
-# 結果の表示エリア
 if st.session_state.results:
     st.markdown("### 抽出結果")
-    
     tsv_lines = []
     for item in st.session_state.results:
         line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
         tsv_lines.append(line)
-    
     tsv_output = "\n".join(tsv_lines)
     
     st.markdown("---")
@@ -1077,7 +1040,6 @@ if st.session_state.results:
     st.code(tsv_output, language="text")
     
     st.markdown("### プレビュー表")
-    
     df = pd.DataFrame(st.session_state.results)
     df.index = range(1, len(df) + 1)
     
@@ -1085,20 +1047,10 @@ if st.session_state.results:
     cols = [c for c in cols if c in df.columns]
     df = df[cols]
     
-    df.rename(columns={
-        "category": "区分",
-        "title": "件名",
-        "bureau": "局名",
-        "fileName": "元ファイル名"
-    }, inplace=True)
-
-    st.dataframe(
-        df,
-        use_container_width=True,
-        column_config={
-            "区分": st.column_config.TextColumn(width="small"),
-            "件名": st.column_config.TextColumn(width="large"), 
-            "局名": st.column_config.TextColumn(width="small"),
-            "元ファイル名": st.column_config.TextColumn(width="medium"),
-        }
-    )
+    df.rename(columns={"category": "区分", "title": "件名", "bureau": "局名", "fileName": "元ファイル名"}, inplace=True)
+    st.dataframe(df, use_container_width=True, column_config={
+        "区分": st.column_config.TextColumn(width="small"),
+        "件名": st.column_config.TextColumn(width="large"), 
+        "局名": st.column_config.TextColumn(width="small"),
+        "元ファイル名": st.column_config.TextColumn(width="medium"),
+    })
