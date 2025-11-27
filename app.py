@@ -54,7 +54,7 @@ try:
 except Exception:
     st.warning("⚠️ APIキーが設定されていません。")
 
-# 定数リスト
+# 定数リスト（局名リストはAIへの参考情報として使用）
 VALID_BUREAUS = [
   "政策企画局", "子供政策連携室", "総務局", "財務局", "デジタルサービス局", "主税局", "生活文化局", 
   "都民安全総合対策本部", "スポーツ推進本部", "都市整備局", "住宅政策本部", "環境局", "福祉局", 
@@ -931,45 +931,65 @@ TRAINING_EXAMPLES = """
 #  関数定義
 # ==========================================
 
-def extract_title_from_filename(filename):
-    name = re.sub(r'^【[^】]+】', '', filename)
-    name = re.sub(r'\.pdf$', '', name, flags=re.IGNORECASE)
-    return name.strip()
+def parse_filename_info(filename):
+    """
+    ファイル名から「局名」と「件名」を機械的に抽出する関数
+    ルール: 冒頭の【】の中身を局名とし、それ以降を件名とする。
+    """
+    # 1. 局名の抽出: 先頭の【】の中身を取得
+    bureau_match = re.match(r'^【([^】]+)】', filename)
+    if bureau_match:
+        bureau = bureau_match.group(1)
+    else:
+        bureau = "" # 【】がない場合は空文字
+
+    # 2. 件名の抽出: 【局名】を削除し、末尾の拡張子も削除
+    # ^【[^】]+】 は「先頭にある【任意の文字】」という意味
+    title = re.sub(r'^【[^】]+】', '', filename)
+    title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE)
+    title = title.strip() # 前後の空白削除
+    
+    return bureau, title
 
 def clean_json_string(text):
-    """
-    AIが返したテキストからJSON部分だけを無理やり抽出する関数
-    """
+    """AIの回答からJSON部分だけを取り出す"""
     text = text.strip()
-    # コードブロック ```json ... ``` の除去
     if "```" in text:
         text = re.sub(r'```(?:json)?', '', text).strip()
-    
-    # 最も外側の {} を探す
     start = text.find('{')
     end = text.rfind('}')
-    
     if start != -1 and end != -1:
         return text[start:end+1]
     return text
 
-def call_gemini_with_retry(model, prompt, file_bytes, max_retries=5):
-    for attempt in range(max_retries):
-        try:
-            response = model.generate_content([
-                prompt,
-                {"mime_type": "application/pdf", "data": file_bytes}
-            ])
-            return response
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "ResourceExhausted" in error_str or "Quota exceeded" in error_str:
-                if attempt < max_retries - 1:
-                    wait_time = (2 ** (attempt + 1)) + random.uniform(1, 3)
-                    st.toast(f"⚠️ アクセス集中（429エラー）... {int(wait_time)}秒待機して再試行します")
-                    time.sleep(wait_time)
-                    continue
-            raise e
+def call_gemini_category_only(model, title, bureau):
+    """
+    局名と件名は確定しているので、AIには「区分」だけを考えさせる
+    """
+    prompt = f"""
+    You are a classification system.
+    Classify the document based on its title and bureau.
+
+    Title: {title}
+    Bureau: {bureau}
+
+    Candidate Categories:
+    {', '.join(VALID_CATEGORIES)}
+
+    Reference Examples (Do not output these):
+    {TRAINING_EXAMPLES}
+
+    Instructions:
+    1. Determine the best category from the list above based on the Title and Examples.
+    2. Output ONLY a valid JSON object.
+
+    Output Format:
+    {{ "category": "区分 string" }}
+    """
+    
+    # 画像なし・テキストのみでリクエスト（高速）
+    response = model.generate_content(prompt)
+    return response
 
 # ==========================================
 #  メイン処理
@@ -983,7 +1003,8 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    model = genai.GenerativeModel("gemini-2.0-flash-lite")
+    # 【修正】ご指定のモデル名
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
     
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
     
@@ -995,55 +1016,31 @@ if uploaded_files:
             status_text.text(f"処理中... {file.name}")
             
             try:
-                fixed_title = extract_title_from_filename(file.name)
-                file_bytes = file.getvalue()
+                # 1. Pythonで機械的に局名・件名を抽出（AI不使用・0秒）
+                bureau, title = parse_filename_info(file.name)
                 
-                # プロンプトの強化：JSON形式を徹底させる
-                CURRENT_PROMPT = f"""
-                You are a classification system.
-                Classify the document based on its title and visual content.
-
-                Title: {fixed_title}
-
-                Candidate Categories:
-                {', '.join(VALID_CATEGORIES)}
-
-                Reference Examples (Do not output these):
-                {TRAINING_EXAMPLES}
-
-                Instructions:
-                1. Extract the bureau name from the document image (usually top right).
-                2. Determine the best category from the list above based on the Title and Examples.
-                3. Output ONLY a valid JSON object. Do not add markdown formatting.
-
-                Output Format:
-                {{ "bureau": "局名 string", "category": "区分 string" }}
-                """
-
-                response = call_gemini_with_retry(model, CURRENT_PROMPT, file_bytes)
+                # 2. AIには「区分」だけを推測させる（テキストのみ送信）
+                response = call_gemini_category_only(model, title, bureau)
                 
-                # JSON抽出処理の強化
+                # JSON抽出
                 json_str = clean_json_string(response.text)
                 
                 try:
                     data = json.loads(json_str)
                     category = data.get("category", "不明")
-                    bureau_ai = data.get("bureau", "")
                 except json.JSONDecodeError:
-                    # JSON解析に失敗しても、テキストの中にカテゴリ名が含まれていればそれを採用する救済措置
-                    found_category = "不明"
+                    # 救済措置: テキスト内にカテゴリ名があれば採用
+                    category = "不明"
                     for cat in VALID_CATEGORIES:
                         if cat in response.text:
-                            found_category = cat
+                            category = cat
                             break
-                    category = found_category
-                    bureau_ai = "" # 局名は諦めるか、ファイル名から推測も可能ですが一旦空で
 
-                # 3. 保存
+                # 3. 結果を保存
                 result_entry = {
                     "fileName": file.name,
-                    "bureau": bureau_ai,
-                    "title": fixed_title,
+                    "bureau": bureau,   # ファイル名から抽出したそのままの値
+                    "title": title,     # ファイル名から抽出したそのままの値
                     "category": category
                 }
                 
@@ -1051,18 +1048,20 @@ if uploaded_files:
                 st.session_state.processed_files.add(file.file_id)
                 
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"Error processing {file.name}: {e}")
+                # エラー時も局名と件名は確保できているので表示する
                 error_entry = {
                     "fileName": file.name,
-                    "bureau": "",
-                    "title": fixed_title if 'fixed_title' in locals() else file.name,
+                    "bureau": bureau if 'bureau' in locals() else "",
+                    "title": title if 'title' in locals() else file.name,
                     "category": "Error"
                 }
                 st.session_state.results.append(error_entry)
                 st.session_state.processed_files.add(file.file_id)
             
             progress_bar.progress((i + 1) / len(new_files))
-            time.sleep(2)
+            # テキストのみなので待ち時間は最小限でOK
+            time.sleep(0.1)
         
         status_text.text("抽出完了！")
         progress_bar.empty()
