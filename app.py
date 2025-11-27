@@ -39,7 +39,7 @@ if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 
 # タイトル
-st.title("📄 タテ表効率化くん（爆速テキストモード）")
+st.title("📄 タテ表効率化くん")
 
 # リセットボタン
 if st.button("🗑️ 結果をリセットする"):
@@ -1083,3 +1083,4 @@ if st.session_state.results:
             "元ファイル名": st.column_config.TextColumn(width="medium"),
         }
     )
+
