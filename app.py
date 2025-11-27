@@ -938,11 +938,8 @@ def extract_title_from_filename(filename):
     """
     ファイル名から【局名】と拡張子(.pdf)を取り除いて、それを「件名」とする関数
     """
-    # 1. 冒頭の【〇〇局】を削除
     name = re.sub(r'^【[^】]+】', '', filename)
-    # 2. 末尾の拡張子(.pdf)を削除（大文字小文字無視）
     name = re.sub(r'\.pdf$', '', name, flags=re.IGNORECASE)
-    # 3. 前後の空白削除
     return name.strip()
 
 def call_gemini_with_retry(model, prompt, file_bytes, max_retries=5):
@@ -958,10 +955,8 @@ def call_gemini_with_retry(model, prompt, file_bytes, max_retries=5):
             return response
         except Exception as e:
             error_str = str(e)
-            # 429エラー(ResourceExhausted/Quota exceeded)の場合のみリトライ
             if "429" in error_str or "ResourceExhausted" in error_str or "Quota exceeded" in error_str:
                 if attempt < max_retries - 1:
-                    # 待機時間を少し長めに設定（指数関数的バックオフ）
                     wait_time = (2 ** (attempt + 1)) + random.uniform(1, 3)
                     st.toast(f"⚠️ アクセス集中（429エラー）... {int(wait_time)}秒待機して再試行します ({attempt+1}/{max_retries})")
                     time.sleep(wait_time)
@@ -980,7 +975,6 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # 【修正箇所】モデル名を指定のものに変更
     model = genai.GenerativeModel("gemini-2.0-flash-lite")
     
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
@@ -993,10 +987,7 @@ if uploaded_files:
             status_text.text(f"処理中... {file.name}")
             
             try:
-                # 1. ファイル名から件名を強制的に生成（AIには頼らない）
                 fixed_title = extract_title_from_filename(file.name)
-                
-                # 2. AIには「区分」と「局名」だけを考えさせる
                 file_bytes = file.getvalue()
                 
                 CURRENT_PROMPT = f"""
@@ -1015,7 +1006,6 @@ if uploaded_files:
                 {{ "bureau": "...", "category": "..." }}
                 """
 
-                # AI呼び出し（リトライ機能付き）
                 response = call_gemini_with_retry(model, CURRENT_PROMPT, file_bytes)
                 
                 text = response.text
@@ -1027,7 +1017,6 @@ if uploaded_files:
                 
                 data = json.loads(json_str)
                 
-                # 3. 件名を上書き保存
                 data["title"] = fixed_title
                 data["fileName"] = file.name
                 
@@ -1038,8 +1027,6 @@ if uploaded_files:
                 st.error(f"エラー ({file.name}): {e}")
             
             progress_bar.progress((i + 1) / len(new_files))
-            
-            # 連続アクセスによる429エラーを防ぐため、処理ごとに少し待機
             time.sleep(2)
         
         status_text.text("抽出完了！")
@@ -1056,11 +1043,12 @@ if st.session_state.results:
     
     tsv_output = "\n".join(tsv_lines)
     
-    st.caption("Excel貼り付け用データ")
+    # 【変更点】コピーエリアを目立たせる
+    st.markdown("---")
+    st.warning("👇 **以下の黒いボックスの右上にある「コピーアイコン（📄）」を押すと、Excelに貼り付け可能な形式でコピーされます**")
     st.code(tsv_output, language="text")
     
-    st.markdown("---")
-    st.caption("プレビュー表")
+    st.markdown("### プレビュー表")
     
     df = pd.DataFrame(st.session_state.results)
     df.index = range(1, len(df) + 1)
