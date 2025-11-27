@@ -920,30 +920,13 @@ def parse_filename_info(filename):
     title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE).strip()
     return bureau, title
 
-def clean_json_string(text):
+def safe_call_gemini(model, title, bureau):
     """
-    JSON文字列をきれいに取り出す関数
-    """
-    text = text.strip()
-    # Markdownのコードブロックを削除
-    if "```" in text:
-        text = re.sub(r'```(?:json)?', '', text).strip()
-    
-    # 最初の{から最後の}までを抽出
-    start = text.find('{')
-    end = text.rfind('}')
-    
-    if start != -1 and end != -1:
-        return text[start:end+1]
-    return text
-
-def call_gemini_json(model, title, bureau):
-    """
-    JSON形式で区分を推論させる
+    【修正版】強制JSONモードと強力なエラーハンドリング
     """
     prompt = f"""
     You are a document classifier.
-    Classify the following document based on its Title and Bureau.
+    Classify the document into one of the categories below based on the Title and Bureau.
 
     Title: {title}
     Bureau: {bureau}
@@ -955,33 +938,62 @@ def call_gemini_json(model, title, bureau):
     {TRAINING_EXAMPLES}
 
     Instructions:
-    1. Select the BEST category from the "Candidate Categories" list.
-    2. If you are unsure, choose the one that seems most likely.
-    3. Output ONLY a valid JSON object.
+    1. Select the BEST category from the list.
+    2. Output strictly in JSON format.
 
-    Output Format:
+    Output Schema:
     {{ "category": "YOUR_SELECTED_CATEGORY" }}
     """
     
-    # リトライ処理
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = model.generate_content(prompt)
-            return response.text
+            # generation_configでJSON出力を強制する
+            response = model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            
+            # JSON解析
+            result = json.loads(response.text)
+            category = result.get("category", "（要確認）")
+            
+            # リストにある言葉かチェック（ゴミが入っていないか）
+            # 部分一致でもOKとする（例: "カテゴリ: 事業、計画" となってしまっても "事業、計画" とみなす）
+            clean_category = "（要確認）"
+            for valid in VALID_CATEGORIES:
+                if valid in category:
+                    clean_category = valid
+                    break
+            
+            # リストになくても、短ければAIの答えを尊重（未知のカテゴリの可能性）
+            if clean_category == "（要確認）" and len(category) < 20:
+                clean_category = category
+                
+            return clean_category
+
         except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2 * (attempt + 1))
-                continue
-            else:
-                raise e
+            # 429エラー（容量オーバー）の場合は待機してリトライ
+            if "429" in str(e) or "Quota" in str(e):
+                if attempt < max_retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+            
+            # その他のエラー、またはリトライ回数切れの場合
+            print(f"API Error ({attempt}): {e}")
+            
+    # 全てのリトライに失敗した場合、エラーで止めるのではなく
+    # 「（要確認）」を返して表の作成を続行させる（フェイルセーフ）
+    return "（要確認）"
 
 # --- メイン処理 ---
 
 uploaded_files = st.file_uploader(" ", type="pdf", accept_multiple_files=True, key="file_uploader")
 
 if uploaded_files:
+    # モデル設定（強制JSONモード対応）
     model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
     
     if new_files:
@@ -991,51 +1003,24 @@ if uploaded_files:
         for i, file in enumerate(new_files):
             status_text.text(f"処理中 ({i+1}/{len(new_files)}): {file.name}")
             
-            try:
-                # 1. 局名・件名抽出（Python）
-                bureau, title = parse_filename_info(file.name)
-                
-                # 2. AI推論（JSONモード）
-                response_text = call_gemini_json(model, title, bureau)
-                
-                # 3. JSON解析とエラーハンドリング
-                json_str = clean_json_string(response_text)
-                
-                category = "（要確認）" # デフォルト値
-                try:
-                    data = json.loads(json_str)
-                    category = data.get("category", "（要確認）")
-                except json.JSONDecodeError:
-                    # JSON失敗時はテキスト内にカテゴリ名があるか探す
-                    for valid_cat in VALID_CATEGORIES:
-                        if valid_cat in response_text:
-                            category = valid_cat
-                            break
-                
-                result_entry = {
-                    "fileName": file.name,
-                    "bureau": bureau,
-                    "title": title,
-                    "category": category
-                }
-                
-                st.session_state.results.append(result_entry)
-                st.session_state.processed_files.add(file.file_id)
-                
-            except Exception as e:
-                print(f"Error: {e}")
-                # 万が一APIエラーが起きても止まらずに記録
-                error_entry = {
-                    "fileName": file.name,
-                    "bureau": bureau if 'bureau' in locals() else "",
-                    "title": title if 'title' in locals() else file.name,
-                    "category": "Error"
-                }
-                st.session_state.results.append(error_entry)
-                st.session_state.processed_files.add(file.file_id)
+            # 1. 局名・件名抽出（Python）
+            bureau, title = parse_filename_info(file.name)
+            
+            # 2. AI推論（エラーが出ても「（要確認）」として返ってくる）
+            category = safe_call_gemini(model, title, bureau)
+            
+            result_entry = {
+                "fileName": file.name,
+                "bureau": bureau,
+                "title": title,
+                "category": category
+            }
+            
+            st.session_state.results.append(result_entry)
+            st.session_state.processed_files.add(file.file_id)
             
             progress_bar.progress((i + 1) / len(new_files))
-            time.sleep(1.0) # 安定のための待機
+            time.sleep(0.5) # 最低限の待機（API制限回避）
         
         status_text.text("抽出完了！")
         progress_bar.empty()
@@ -1044,6 +1029,7 @@ if st.session_state.results:
     st.markdown("### 抽出結果")
     tsv_lines = []
     for item in st.session_state.results:
+        # Excel貼り付け用にTSV作成
         line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
         tsv_lines.append(line)
     tsv_output = "\n".join(tsv_lines)
