@@ -1,5 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
+import json
 import pandas as pd
 import re
 import time
@@ -49,14 +50,7 @@ try:
 except Exception:
     st.warning("⚠️ APIキーが設定されていません。")
 
-VALID_BUREAUS = [
-  "政策企画局", "子供政策連携室", "総務局", "財務局", "デジタルサービス局", "主税局", "生活文化局", 
-  "都民安全総合対策本部", "スポーツ推進本部", "都市整備局", "住宅政策本部", "環境局", "福祉局", 
-  "保健医療局", "産業労働局", "中央卸売市場", "スタートアップ戦略推進本部", "建設局", "港湾局", 
-  "会計管理局", "交通局", "水道局", "下水道局", "教育庁", "選挙管理委員会事務局", "人事委員会事務局", 
-  "監査事務局", "労働委員会事務局", "収用委員会事務局", "警視庁", "東京消防庁"
-]
-
+# 選択肢リスト
 VALID_CATEGORIES = [
   "答申･報告･調査結果", "事業、計画", "会議等", "募集", "ｲﾍﾞﾝﾄ･講演", "事件･事故･処分",
   "動物", "人事･訃報･表彰", "資料", "ｺﾒﾝﾄ･声明･談話", "選挙関係", "入試関係",
@@ -926,54 +920,61 @@ def parse_filename_info(filename):
     title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE).strip()
     return bureau, title
 
-def call_gemini_simple(model, title, bureau):
+def clean_json_string(text):
+    """
+    JSON文字列をきれいに取り出す関数
+    """
+    text = text.strip()
+    # Markdownのコードブロックを削除
+    if "```" in text:
+        text = re.sub(r'```(?:json)?', '', text).strip()
+    
+    # 最初の{から最後の}までを抽出
+    start = text.find('{')
+    end = text.rfind('}')
+    
+    if start != -1 and end != -1:
+        return text[start:end+1]
+    return text
+
+def call_gemini_json(model, title, bureau):
+    """
+    JSON形式で区分を推論させる
+    """
     prompt = f"""
-    文書の件名から、最も適切な「区分」を1つ選んでください。
+    You are a document classifier.
+    Classify the following document based on its Title and Bureau.
 
-    件名: {title}
-    局名: {bureau}
+    Title: {title}
+    Bureau: {bureau}
 
-    【選択肢】
+    Candidate Categories:
     {', '.join(VALID_CATEGORIES)}
 
-    【学習データ】
+    Reference Examples:
     {TRAINING_EXAMPLES}
 
-    回答は選択肢の中の言葉（例：「事業、計画」）のみを返してください。余計な文字は不要です。
+    Instructions:
+    1. Select the BEST category from the "Candidate Categories" list.
+    2. If you are unsure, choose the one that seems most likely.
+    3. Output ONLY a valid JSON object.
+
+    Output Format:
+    {{ "category": "YOUR_SELECTED_CATEGORY" }}
     """
     
+    # リトライ処理
     max_retries = 3
     for attempt in range(max_retries):
         try:
             response = model.generate_content(prompt)
-            return response.text.strip()
+            return response.text
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))
                 continue
             else:
                 raise e
-
-def extract_valid_category(text):
-    """
-    【最強クリーニング関数】
-    AIの回答テキストの中に、有効なカテゴリ名が含まれているか総当たりで探す。
-    見つかればそれを返す。見つからなければ元のテキスト（または不明）を返す。
-    """
-    # 改行や空白を削除して1行にする
-    clean_text = text.replace("\n", "").replace(" ", "").replace("　", "")
-    
-    # 優先順位: 完全一致 -> 部分一致
-    for cat in VALID_CATEGORIES:
-        if cat == clean_text:
-            return cat
-            
-    # 部分一致（「回答は事業、計画です」みたいな場合）
-    for cat in VALID_CATEGORIES:
-        if cat in text:
-            return cat
-            
-    return "不明" # どうしても見つからない場合
 
 # --- メイン処理 ---
 
@@ -991,27 +992,39 @@ if uploaded_files:
             status_text.text(f"処理中 ({i+1}/{len(new_files)}): {file.name}")
             
             try:
+                # 1. 局名・件名抽出（Python）
                 bureau, title = parse_filename_info(file.name)
                 
-                # AI推論
-                ai_response = call_gemini_simple(model, title, bureau)
+                # 2. AI推論（JSONモード）
+                response_text = call_gemini_json(model, title, bureau)
                 
-                # 【ここが重要】AIの回答から有効なカテゴリだけを抽出する
-                final_category = extract_valid_category(ai_response)
+                # 3. JSON解析とエラーハンドリング
+                json_str = clean_json_string(response_text)
+                
+                category = "（要確認）" # デフォルト値
+                try:
+                    data = json.loads(json_str)
+                    category = data.get("category", "（要確認）")
+                except json.JSONDecodeError:
+                    # JSON失敗時はテキスト内にカテゴリ名があるか探す
+                    for valid_cat in VALID_CATEGORIES:
+                        if valid_cat in response_text:
+                            category = valid_cat
+                            break
                 
                 result_entry = {
                     "fileName": file.name,
                     "bureau": bureau,
                     "title": title,
-                    "category": final_category
+                    "category": category
                 }
                 
                 st.session_state.results.append(result_entry)
                 st.session_state.processed_files.add(file.file_id)
                 
             except Exception as e:
-                # エラーが出ても止まらず、とりあえず「Error」として記録
-                print(f"Error processing {file.name}: {e}")
+                print(f"Error: {e}")
+                # 万が一APIエラーが起きても止まらずに記録
                 error_entry = {
                     "fileName": file.name,
                     "bureau": bureau if 'bureau' in locals() else "",
@@ -1022,7 +1035,7 @@ if uploaded_files:
                 st.session_state.processed_files.add(file.file_id)
             
             progress_bar.progress((i + 1) / len(new_files))
-            time.sleep(1.0)
+            time.sleep(1.0) # 安定のための待機
         
         status_text.text("抽出完了！")
         progress_bar.empty()
