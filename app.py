@@ -1,3 +1,4 @@
+
 import streamlit as st
 import google.generativeai as genai
 import json
@@ -12,15 +13,14 @@ st.set_page_config(page_title="タテ表効率化くん", layout="wide")
 # CSS: ドラッグ＆ドロップエリアをさらに大きく見やすくする
 st.markdown("""
 <style>
-    /* ファイルアップローダーのクリック・ドロップ領域を大幅に拡大 */
     div[data-testid="stFileUploader"] section {
-        padding: 100px 20px; /* 上下の余白を広げて高さを出す */
-        border: 3px dashed #4A90E2; /* 枠線を太く */
+        padding: 100px 20px;
+        border: 3px dashed #4A90E2;
         background-color: #f0f7ff;
         text-align: center;
     }
     div[data-testid="stFileUploader"] section > button {
-        display: none; /* ボタンがあっても邪魔なので消す（ドラッグ推奨） */
+        display: none;
     }
     div[data-testid="stFileUploader"] section::after {
         content: "ここにPDFファイルをドラッグ＆ドロップしてください";
@@ -72,173 +72,11 @@ VALID_CATEGORIES = [
 ]
 
 # ==========================================
-#  関数定義
+#  【重要】学習データ定義
+#  Pythonのルール上、これを使う処理よりも「前（上）」に書く必要があります。
 # ==========================================
 
-def extract_title_from_filename(filename):
-    """
-    ファイル名から【局名】と拡張子(.pdf)を取り除いて、それを「件名」とする関数
-    """
-    # 1. 冒頭の【〇〇局】を削除（【任意の文字】のパターン）
-    name = re.sub(r'^【[^】]+】', '', filename)
-    # 2. 末尾の拡張子(.pdf)を削除（大文字小文字無視）
-    name = re.sub(r'\.pdf$', '', name, flags=re.IGNORECASE)
-    # 3. 前後の空白削除
-    return name.strip()
-
-def call_gemini_with_retry(model, prompt, file_bytes, max_retries=3):
-    """
-    429エラー（Rate Limit）が出た場合に自動で待機してリトライする関数
-    """
-    for attempt in range(max_retries):
-        try:
-            response = model.generate_content([
-                prompt,
-                {"mime_type": "application/pdf", "data": file_bytes}
-            ])
-            return response
-        except Exception as e:
-            error_str = str(e)
-            # 429エラー（ResourceExhausted）の場合のみリトライ
-            if "429" in error_str or "ResourceExhausted" in error_str or "Quota exceeded" in error_str:
-                if attempt < max_retries - 1:
-                    # 待機時間（徐々に長くする + ランダム要素で分散）
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    st.toast(f"⚠️ 混雑中... {int(wait_time)}秒待機して再試行します ({attempt+1}/{max_retries})")
-                    time.sleep(wait_time)
-                    continue
-            # その他のエラーまたはリトライ切れの場合は例外を投げる
-            raise e
-
-# ==========================================
-#  メイン処理
-# ==========================================
-
-uploaded_files = st.file_uploader(
-    " ", 
-    type="pdf", 
-    accept_multiple_files=True,
-    key="file_uploader"
-)
-
-# ファイルがアップロードされたら自動的に処理を開始
-if uploaded_files:
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
-    
-    # まだ処理していない新しいファイルだけを選別
-    new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
-    
-    if new_files:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i, file in enumerate(new_files):
-            status_text.text(f"処理中... {file.name}")
-            
-            try:
-                # 1. ファイル名から件名を強制的に生成
-                fixed_title = extract_title_from_filename(file.name)
-                
-                # 2. AIには「区分」と「局名」だけを考えさせる（件名は教えなくていい）
-                file_bytes = file.getvalue()
-                
-                # プロンプトは下部にある定義を使用
-                # ここでは学習データを含めたプロンプトを構築
-                CURRENT_PROMPT = f"""
-                添付された文書画像から、以下の情報をJSON形式で抽出してください。
-                1. bureau: 文書を発行した局名（通常右上に記載）。リストから選択: {', '.join(VALID_BUREAUS)}
-                2. category: 件名「{fixed_title}」から推測される分類。リストから選択: {', '.join(VALID_CATEGORIES)}
-
-                【分類（Category）の判断基準】
-                以下の「学習用データ」に含まれる分類パターンを参考にし、最も近いものを選んでください。
-                特に「取材案内」や「デフリンピック・世界陸上」などのパターンに注意してください。
-
-                [学習用データ]
-                {TRAINING_EXAMPLES}
-
-                出力は以下のJSON形式のみにしてください：
-                {{ "bureau": "...", "category": "..." }}
-                """
-
-                # AI呼び出し（リトライ機能付き）
-                response = call_gemini_with_retry(model, CURRENT_PROMPT, file_bytes)
-                
-                text = response.text
-                json_str = text.strip()
-                if "```json" in json_str:
-                    json_str = json_str.split("```json")[1].split("```")[0]
-                elif "```" in json_str:
-                    json_str = json_str.split("```")[1].split("```")[0]
-                
-                data = json.loads(json_str)
-                
-                # 3. 強制的にファイル名由来のタイトルで上書き保存
-                data["title"] = fixed_title
-                data["fileName"] = file.name # 元のファイル名も保存（表示用）
-                
-                st.session_state.results.append(data)
-                st.session_state.processed_files.add(file.file_id)
-                
-            except Exception as e:
-                st.error(f"エラー ({file.name}): {e}")
-            
-            progress_bar.progress((i + 1) / len(new_files))
-            
-            # 連続アクセスを防ぐため少し待機
-            time.sleep(1)
-        
-        status_text.text("抽出完了！")
-        progress_bar.empty()
-
-# 結果の表示エリア
-if st.session_state.results:
-    st.markdown("### 抽出結果")
-    
-    # Excel貼り付け用データの作成
-    tsv_lines = []
-    for item in st.session_state.results:
-        line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
-        tsv_lines.append(line)
-    
-    tsv_output = "\n".join(tsv_lines)
-    
-    st.caption("Excel貼り付け用データ（右上のコピーボタンを押してください）")
-    st.code(tsv_output, language="text")
-    
-    st.markdown("---")
-    st.caption("プレビュー表")
-    
-    df = pd.DataFrame(st.session_state.results)
-    df.index = range(1, len(df) + 1)
-    
-    # カラム整理
-    cols = ["category", "title", "bureau", "fileName"]
-    cols = [c for c in cols if c in df.columns]
-    df = df[cols]
-    
-    df.rename(columns={
-        "category": "区分",
-        "title": "件名",
-        "bureau": "局名",
-        "fileName": "元ファイル名"
-    }, inplace=True)
-
-    st.dataframe(
-        df,
-        use_container_width=True,
-        column_config={
-            "区分": st.column_config.TextColumn(width="small"),
-            "件名": st.column_config.TextColumn(width="large"), 
-            "局名": st.column_config.TextColumn(width="small"),
-            "元ファイル名": st.column_config.TextColumn(width="medium"),
-        }
-    )
-
-# ==========================================
-#  学習データ定義（一番下に配置）
-# ==========================================
-
-# ⚠️以前のコードにある大量のデータをここにコピペしてください
+# ⚠️ここに以前の「TRAINING_EXAMPLES」の中身（大量のデータ）をすべて貼り付けてください
 TRAINING_EXAMPLES = """
 取材案内	（取材案内） 高円宮妃殿下「第40回東京都障害者総合美術展」お成りについて	福祉局
 取材案内	（取材案内）環境に配慮した都市農業とエシカル消費について考える「TOKYO農業フォーラム2025」の開催について	産業労働局
@@ -1092,3 +930,156 @@ TRAINING_EXAMPLES = """
 ｲﾍﾞﾝﾄ･講演	～TOKYO H2プロジェクト 第２弾！～Japan Mobility Show 2025で、都主催トークショーを開催します！	産業労働局
 ｲﾍﾞﾝﾄ･講演	 令和7年度「障害者週間」記念の集い第45回ふれあいフェスティバル	福祉局
 """
+
+# ==========================================
+#  関数定義
+# ==========================================
+
+def extract_title_from_filename(filename):
+    """
+    ファイル名から【局名】と拡張子(.pdf)を取り除いて、それを「件名」とする関数
+    """
+    # 1. 冒頭の【〇〇局】を削除
+    name = re.sub(r'^【[^】]+】', '', filename)
+    # 2. 末尾の拡張子(.pdf)を削除（大文字小文字無視）
+    name = re.sub(r'\.pdf$', '', name, flags=re.IGNORECASE)
+    # 3. 前後の空白削除
+    return name.strip()
+
+def call_gemini_with_retry(model, prompt, file_bytes, max_retries=3):
+    """
+    429エラー（Rate Limit）が出た場合に自動で待機してリトライする関数
+    """
+    for attempt in range(max_retries):
+        try:
+            response = model.generate_content([
+                prompt,
+                {"mime_type": "application/pdf", "data": file_bytes}
+            ])
+            return response
+        except Exception as e:
+            error_str = str(e)
+            # 429エラーの場合のみリトライ
+            if "429" in error_str or "ResourceExhausted" in error_str or "Quota exceeded" in error_str:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) + random.uniform(0, 1)
+                    st.toast(f"⚠️ 混雑中... {int(wait_time)}秒待機して再試行します ({attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+            raise e
+
+# ==========================================
+#  メイン処理
+# ==========================================
+
+uploaded_files = st.file_uploader(
+    " ", 
+    type="pdf", 
+    accept_multiple_files=True,
+    key="file_uploader"
+)
+
+if uploaded_files:
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    
+    new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
+    
+    if new_files:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, file in enumerate(new_files):
+            status_text.text(f"処理中... {file.name}")
+            
+            try:
+                # 1. ファイル名から件名を強制的に生成（AIには頼らない）
+                fixed_title = extract_title_from_filename(file.name)
+                
+                # 2. AIには「区分」と「局名」だけを考えさせる
+                file_bytes = file.getvalue()
+                
+                CURRENT_PROMPT = f"""
+                添付された文書画像から、以下の情報をJSON形式で抽出してください。
+                1. bureau: 文書を発行した局名（通常右上に記載）。リストから選択: {', '.join(VALID_BUREAUS)}
+                2. category: 件名「{fixed_title}」から推測される分類。リストから選択: {', '.join(VALID_CATEGORIES)}
+
+                【分類（Category）の判断基準】
+                以下の「学習用データ」に含まれる分類パターンを参考にし、最も近いものを選んでください。
+                特に「取材案内」や「デフリンピック・世界陸上」などのパターンに注意してください。
+
+                [学習用データ]
+                {TRAINING_EXAMPLES}
+
+                出力は以下のJSON形式のみにしてください：
+                {{ "bureau": "...", "category": "..." }}
+                """
+
+                # AI呼び出し（リトライ機能付き）
+                response = call_gemini_with_retry(model, CURRENT_PROMPT, file_bytes)
+                
+                text = response.text
+                json_str = text.strip()
+                if "```json" in json_str:
+                    json_str = json_str.split("```json")[1].split("```")[0]
+                elif "```" in json_str:
+                    json_str = json_str.split("```")[1].split("```")[0]
+                
+                data = json.loads(json_str)
+                
+                # 3. 件名を上書き保存
+                data["title"] = fixed_title
+                data["fileName"] = file.name
+                
+                st.session_state.results.append(data)
+                st.session_state.processed_files.add(file.file_id)
+                
+            except Exception as e:
+                st.error(f"エラー ({file.name}): {e}")
+            
+            progress_bar.progress((i + 1) / len(new_files))
+            time.sleep(1) # 連続アクセス制限回避のため少し待機
+        
+        status_text.text("抽出完了！")
+        progress_bar.empty()
+
+# 結果の表示エリア
+if st.session_state.results:
+    st.markdown("### 抽出結果")
+    
+    tsv_lines = []
+    for item in st.session_state.results:
+        line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
+        tsv_lines.append(line)
+    
+    tsv_output = "\n".join(tsv_lines)
+    
+    st.caption("Excel貼り付け用データ")
+    st.code(tsv_output, language="text")
+    
+    st.markdown("---")
+    st.caption("プレビュー表")
+    
+    df = pd.DataFrame(st.session_state.results)
+    df.index = range(1, len(df) + 1)
+    
+    cols = ["category", "title", "bureau", "fileName"]
+    cols = [c for c in cols if c in df.columns]
+    df = df[cols]
+    
+    df.rename(columns={
+        "category": "区分",
+        "title": "件名",
+        "bureau": "局名",
+        "fileName": "元ファイル名"
+    }, inplace=True)
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        column_config={
+            "区分": st.column_config.TextColumn(width="small"),
+            "件名": st.column_config.TextColumn(width="large"), 
+            "局名": st.column_config.TextColumn(width="small"),
+            "元ファイル名": st.column_config.TextColumn(width="medium"),
+        }
+    )
