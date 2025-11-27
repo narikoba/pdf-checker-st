@@ -1,4 +1,3 @@
-
 import streamlit as st
 import google.generativeai as genai
 import json
@@ -73,7 +72,7 @@ VALID_CATEGORIES = [
 
 # ==========================================
 #  【重要】学習データ定義
-#  Pythonのルール上、これを使う処理よりも「前（上）」に書く必要があります。
+#  プログラムが読み込む順番のため、ここに配置します
 # ==========================================
 
 # ⚠️ここに以前の「TRAINING_EXAMPLES」の中身（大量のデータ）をすべて貼り付けてください
@@ -946,7 +945,7 @@ def extract_title_from_filename(filename):
     # 3. 前後の空白削除
     return name.strip()
 
-def call_gemini_with_retry(model, prompt, file_bytes, max_retries=3):
+def call_gemini_with_retry(model, prompt, file_bytes, max_retries=5):
     """
     429エラー（Rate Limit）が出た場合に自動で待機してリトライする関数
     """
@@ -959,11 +958,12 @@ def call_gemini_with_retry(model, prompt, file_bytes, max_retries=3):
             return response
         except Exception as e:
             error_str = str(e)
-            # 429エラーの場合のみリトライ
+            # 429エラー(ResourceExhausted/Quota exceeded)の場合のみリトライ
             if "429" in error_str or "ResourceExhausted" in error_str or "Quota exceeded" in error_str:
                 if attempt < max_retries - 1:
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    st.toast(f"⚠️ 混雑中... {int(wait_time)}秒待機して再試行します ({attempt+1}/{max_retries})")
+                    # 待機時間を少し長めに設定（指数関数的バックオフ）
+                    wait_time = (2 ** (attempt + 1)) + random.uniform(1, 3)
+                    st.toast(f"⚠️ アクセス集中（429エラー）... {int(wait_time)}秒待機して再試行します ({attempt+1}/{max_retries})")
                     time.sleep(wait_time)
                     continue
             raise e
@@ -980,7 +980,8 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    # 【修正箇所】モデル名を指定のものに変更
+    model = genai.GenerativeModel("gemini-2.0-flash-lite")
     
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
     
@@ -1037,7 +1038,9 @@ if uploaded_files:
                 st.error(f"エラー ({file.name}): {e}")
             
             progress_bar.progress((i + 1) / len(new_files))
-            time.sleep(1) # 連続アクセス制限回避のため少し待機
+            
+            # 連続アクセスによる429エラーを防ぐため、処理ごとに少し待機
+            time.sleep(2)
         
         status_text.text("抽出完了！")
         progress_bar.empty()
