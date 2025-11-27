@@ -1,7 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
 import json
-import os
 
 # ページ設定
 st.set_page_config(page_title="PDF Bureau Extractor", layout="wide")
@@ -11,12 +10,11 @@ st.title("📄 PDF Title & Bureau Extractor")
 st.write("PDFをアップロードすると、AIが「局名」と「分類」を自動抽出します。")
 
 # APIキーの取得（StreamlitのSecretsから読み込む）
-# ※まだ設定していないので、エラーが出ても気にしないでください
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
 except Exception:
-    st.warning("⚠️ APIキーが設定されていません。後でStreamlitの管理画面で設定します。")
+    st.warning("⚠️ APIキーが設定されていません。StreamlitのSecrets設定を確認してください。")
 
 # 定数リスト
 VALID_BUREAUS = [
@@ -53,13 +51,13 @@ if uploaded_files:
         results = []
         progress_bar = st.progress(0)
         
+        # モデルの準備（指示通り gemini-2.5-flash-lite を使用）
+        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        
         for i, file in enumerate(uploaded_files):
             try:
                 # PDFをバイトデータとして読み込む
                 file_bytes = file.getvalue()
-                
-                # Geminiモデルの準備（FlashモデルはPDFを直接読めます）
-                model = genai.GenerativeModel("gemini-1.5-flash")
                 
                 # AIに送信
                 response = model.generate_content([
