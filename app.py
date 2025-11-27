@@ -2,9 +2,34 @@ import streamlit as st
 import google.generativeai as genai
 import json
 import pandas as pd
+import re
 
 # ページ設定
 st.set_page_config(page_title="タテ表効率化くん", layout="wide")
+
+# CSS: ドラッグ＆ドロップエリアをさらに大きく見やすくする
+st.markdown("""
+<style>
+    /* ファイルアップローダーのクリック・ドロップ領域を大幅に拡大 */
+    div[data-testid="stFileUploader"] section {
+        padding: 100px 20px; /* 上下の余白を広げて高さを出す */
+        border: 3px dashed #4A90E2; /* 枠線を太く */
+        background-color: #f0f7ff;
+        text-align: center;
+    }
+    div[data-testid="stFileUploader"] section > button {
+        display: none; /* ボタンがあっても邪魔なので消す（ドラッグ推奨） */
+    }
+    div[data-testid="stFileUploader"] section::after {
+        content: "ここにPDFファイルをドラッグ＆ドロップしてください";
+        font-size: 1.2em;
+        color: #555;
+        font-weight: bold;
+        display: block;
+        margin-top: 10px;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # セッション状態の初期化
 if "results" not in st.session_state:
@@ -14,7 +39,6 @@ if "processed_files" not in st.session_state:
 
 # タイトル
 st.title("📄 タテ表効率化くん")
-st.write("PDFをドロップすると自動で読み込み、下の表に追加していきます。")
 
 # リセットボタン
 if st.button("🗑️ 結果をリセットする"):
@@ -45,7 +69,147 @@ VALID_CATEGORIES = [
   "デフリンピック・世界陸上", "その他", "災害関係"
 ]
 
-# 学習データ
+# ==========================================
+#  メイン処理：ファイルアップロードとリスト表示
+# ==========================================
+
+# ファイルアップロード（即時反映のためkeyを設定）
+uploaded_files = st.file_uploader(
+    " ", # CSSで文字を出すのでここは空欄
+    type="pdf", 
+    accept_multiple_files=True,
+    key="file_uploader"
+)
+
+# ファイル名整形用の関数
+def clean_filename(filename):
+    # 1. 冒頭の【〇〇局】を削除（【任意の文字】のパターン）
+    name = re.sub(r'^【[^】]+】', '', filename)
+    # 2. 末尾の拡張子(.pdf)を削除（大文字小文字無視）
+    name = re.sub(r'\.pdf$', '', name, flags=re.IGNORECASE)
+    return name
+
+# ==========================================
+#  AI処理ロジック（データ定義の後ろで実行）
+# ==========================================
+
+# AIへの指示プロンプト
+PROMPT = f"""
+添付された文書画像から、以下の情報をJSON形式で抽出してください。
+1. bureau: 文書を発行した局名（通常右上に記載）。リストから選択: {', '.join(VALID_BUREAUS)}
+2. category: 件名から推測される分類。リストから選択: {', '.join(VALID_CATEGORIES)}
+3. title: 文書の件名（「件名：」などのプレフィックスは除く）
+
+【分類（Category）の判断基準】
+以下の「学習用データ」に含まれる分類パターンを参考にし、最も近いものを選んでください。
+特に「取材案内」や「デフリンピック・世界陸上」などのパターンに注意してください。
+
+[学習用データ]
+{TRAINING_EXAMPLES}
+
+出力は以下のJSON形式のみにしてください：
+{{ "bureau": "...", "category": "...", "title": "..." }}
+"""
+
+# ファイルがアップロードされたら自動的に処理を開始
+if uploaded_files:
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    
+    # まだ処理していない新しいファイルだけを選別
+    new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
+    
+    if new_files:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, file in enumerate(new_files):
+            status_text.text(f"処理中... {file.name}")
+            try:
+                file_bytes = file.getvalue()
+                
+                response = model.generate_content([
+                    PROMPT,
+                    {"mime_type": "application/pdf", "data": file_bytes}
+                ])
+                
+                text = response.text
+                json_str = text.strip()
+                # JSONブロックを探して抽出
+                if "```json" in json_str:
+                    json_str = json_str.split("```json")[1].split("```")[0]
+                elif "```" in json_str:
+                    json_str = json_str.split("```")[1].split("```")[0]
+                
+                data = json.loads(json_str)
+                
+                # ファイル名を整形して保存
+                data["fileName"] = clean_filename(file.name)
+                
+                st.session_state.results.append(data)
+                st.session_state.processed_files.add(file.file_id)
+                
+            except Exception as e:
+                st.error(f"エラー ({file.name}): {e}")
+            
+            progress_bar.progress((i + 1) / len(new_files))
+        
+        status_text.text("抽出完了！")
+        progress_bar.empty()
+
+# 結果の表示エリア
+if st.session_state.results:
+    st.markdown("### 抽出結果")
+    
+    # Excel貼り付け用データの作成
+    # 区分 [タブ] 件名 [タブ] 局名
+    tsv_lines = []
+    for item in st.session_state.results:
+        line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
+        tsv_lines.append(line)
+    
+    tsv_output = "\n".join(tsv_lines)
+    
+    st.caption("Excel貼り付け用データ（右上のコピーボタンを押してください）")
+    st.code(tsv_output, language="text")
+    
+    st.markdown("---")
+    st.caption("プレビュー表")
+    
+    # 表示用データフレーム
+    df = pd.DataFrame(st.session_state.results)
+    
+    # 1から始まる連番にする
+    df.index = range(1, len(df) + 1)
+    
+    # 表示カラムの選択（区分、件名、局名、ファイル名）
+    cols = ["category", "title", "bureau", "fileName"]
+    cols = [c for c in cols if c in df.columns]
+    df = df[cols]
+    
+    # カラム名を日本語に変更
+    df.rename(columns={
+        "category": "区分",
+        "title": "件名",
+        "bureau": "局名",
+        "fileName": "ファイル名"
+    }, inplace=True)
+
+    # 件名を広く表示する設定
+    st.dataframe(
+        df,
+        use_container_width=True,
+        column_config={
+            "区分": st.column_config.TextColumn(width="small"),
+            "件名": st.column_config.TextColumn(width="large"), 
+            "局名": st.column_config.TextColumn(width="small"),
+            "ファイル名": st.column_config.TextColumn(width="medium"),
+        }
+    )
+# ==========================================
+#  学習データ定義（一番下に配置）
+# ==========================================
+
+# ⚠️注意: ここに以前の「TRAINING_EXAMPLES」の中身をすべて貼り付けてください
 TRAINING_EXAMPLES = """
 取材案内	（取材案内） 高円宮妃殿下「第40回東京都障害者総合美術展」お成りについて	福祉局
 取材案内	（取材案内）環境に配慮した都市農業とエシカル消費について考える「TOKYO農業フォーラム2025」の開催について	産業労働局
@@ -898,126 +1062,5 @@ TRAINING_EXAMPLES = """
 取材案内	（知事・取材案内）（変更）「第７回女性首長によるびじょんネットワーク」を開催	産業労働局
 ｲﾍﾞﾝﾄ･講演	～TOKYO H2プロジェクト 第２弾！～Japan Mobility Show 2025で、都主催トークショーを開催します！	産業労働局
 ｲﾍﾞﾝﾄ･講演	 令和7年度「障害者週間」記念の集い第45回ふれあいフェスティバル	福祉局
-"""
-
-# AIへの指示プロンプト
-PROMPT = f"""
-添付された文書画像から、以下の情報をJSON形式で抽出してください。
-1. bureau: 文書を発行した局名（通常右上に記載）。リストから選択: {', '.join(VALID_BUREAUS)}
-2. category: 件名から推測される分類。リストから選択: {', '.join(VALID_CATEGORIES)}
-3. title: 文書の件名（「件名：」などのプレフィックスは除く）
-
-【分類（Category）の判断基準】
-以下の「学習用データ」に含まれる分類パターンを参考にし、最も近いものを選んでください。
-特に「取材案内」や「デフリンピック・世界陸上」などのパターンに注意してください。
-
-[学習用データ]
-{TRAINING_EXAMPLES}
-
-出力は以下のJSON形式のみにしてください：
-{{ "bureau": "...", "category": "...", "title": "..." }}
-"""
-
-# ファイルアップロード（即時反映のためkeyを設定）
-uploaded_files = st.file_uploader(
-    "PDFファイルをここにドラッグ＆ドロップ（次々に追加できます）", 
-    type="pdf", 
-    accept_multiple_files=True,
-    key="file_uploader"
-)
-
-# ファイルがアップロードされたら自動的に処理を開始
-if uploaded_files:
-    # モデルの準備（gemini-2.5-flash-lite 固定）
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
-    
-    # まだ処理していない新しいファイルだけを選別
-    new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
-    
-    if new_files:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i, file in enumerate(new_files):
-            status_text.text(f"処理中... {file.name}")
-            try:
-                file_bytes = file.getvalue()
-                
-                response = model.generate_content([
-                    PROMPT,
-                    {"mime_type": "application/pdf", "data": file_bytes}
-                ])
-                
-                text = response.text
-                json_str = text.strip()
-                if "```json" in json_str:
-                    json_str = json_str.split("```json")[1].split("```")[0]
-                elif "```" in json_str:
-                    json_str = json_str.split("```")[1].split("```")[0]
-                
-                data = json.loads(json_str)
-                data["fileName"] = file.name
-                
-                # 結果リストに追加
-                st.session_state.results.append(data)
-                # 処理済みIDとして記録
-                st.session_state.processed_files.add(file.file_id)
-                
-            except Exception as e:
-                st.error(f"エラー ({file.name}): {e}")
-            
-            progress_bar.progress((i + 1) / len(new_files))
-        
-        status_text.text("抽出完了！")
-        progress_bar.empty()
-
-# 結果の表示エリア
-if st.session_state.results:
-    st.markdown("### 抽出結果")
-    
-    # Excel貼り付け用データの作成（タブ区切り：区分 -> 件名 -> 局名）
-    # ※ここはあえて横長のままにします（改行を入れるとExcelでセルが崩れるため）
-    tsv_lines = []
-    for item in st.session_state.results:
-        line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
-        tsv_lines.append(line)
-    
-    tsv_output = "\n".join(tsv_lines)
-    
-    st.caption("Excel貼り付け用データ（区分 / 件名 / 局名）")
-    st.code(tsv_output, language="text")
-    
-    st.markdown("---")
-    st.caption("プレビュー表")
-    
-    # 表示用データフレーム
-    df = pd.DataFrame(st.session_state.results)
-    
-    # 1から始まる連番にする
-    df.index = range(1, len(df) + 1)
-    
-    # 表示順序の整理（区分、件名、局名、ファイル名）
-    cols = ["category", "title", "bureau", "fileName"]
-    # 存在しないカラムがある場合のエラー回避
-    cols = [c for c in cols if c in df.columns]
-    df = df[cols]
-    
-    # カラム名を日本語に変更
-    df.rename(columns={
-        "category": "区分",
-        "title": "件名",
-        "bureau": "局名",
-        "fileName": "ファイル名"
-    }, inplace=True)
-
-    # 件名を広く表示する設定
-    st.dataframe(
-        df,
-        use_container_width=True,
-        column_config={
-            "区分": st.column_config.TextColumn(width="small"),
-            "件名": st.column_config.TextColumn(width="large"), # largeで最大化
-            "局名": st.column_config.TextColumn(width="small"),
-            "ファイル名": st.column_config.TextColumn(width="small"),
-        }
+}
     )
