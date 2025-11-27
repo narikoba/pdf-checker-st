@@ -920,9 +920,33 @@ def parse_filename_info(filename):
     title = re.sub(r'\.pdf$', '', title, flags=re.IGNORECASE).strip()
     return bureau, title
 
+def force_category_match(text):
+    """
+    AIの回答から有効なカテゴリを無理やり探し出す関数
+    """
+    # 1. 完全一致チェック
+    if text in VALID_CATEGORIES:
+        return text
+    
+    # 2. 部分一致チェック（リストの言葉が回答に含まれているか）
+    for cat in VALID_CATEGORIES:
+        if cat in text:
+            return cat
+            
+    # 3. 逆方向の部分一致（回答がリストの言葉の一部か：例 AI「イベント」→ リスト「イベント・講演」）
+    for cat in VALID_CATEGORIES:
+        # 記号などを除いて比較
+        simple_cat = cat.replace("･", "").replace("・", "").replace("、", "")
+        simple_text = text.replace("･", "").replace("・", "").replace("、", "")
+        if simple_text in simple_cat and len(simple_text) > 1:
+            return cat
+
+    # 4. どうしてもわからなければ「その他」に逃げる（要確認とは言わない）
+    return "その他"
+
 def safe_call_gemini(model, title, bureau):
     """
-    【修正版】強制JSONモードと強力なエラーハンドリング
+    JSONモードで推論し、失敗しても強制的にカテゴリを割り当てる
     """
     prompt = f"""
     You are a document classifier.
@@ -939,7 +963,8 @@ def safe_call_gemini(model, title, bureau):
 
     Instructions:
     1. Select the BEST category from the list.
-    2. Output strictly in JSON format.
+    2. If unsure, choose the closest one or "その他".
+    3. Output ONLY a valid JSON object.
 
     Output Schema:
     {{ "category": "YOUR_SELECTED_CATEGORY" }}
@@ -948,52 +973,38 @@ def safe_call_gemini(model, title, bureau):
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # generation_configでJSON出力を強制する
             response = model.generate_content(
                 prompt,
                 generation_config={"response_mime_type": "application/json"}
             )
             
             # JSON解析
-            result = json.loads(response.text)
-            category = result.get("category", "（要確認）")
-            
-            # リストにある言葉かチェック（ゴミが入っていないか）
-            # 部分一致でもOKとする（例: "カテゴリ: 事業、計画" となってしまっても "事業、計画" とみなす）
-            clean_category = "（要確認）"
-            for valid in VALID_CATEGORIES:
-                if valid in category:
-                    clean_category = valid
-                    break
-            
-            # リストになくても、短ければAIの答えを尊重（未知のカテゴリの可能性）
-            if clean_category == "（要確認）" and len(category) < 20:
-                clean_category = category
-                
-            return clean_category
+            try:
+                result = json.loads(response.text)
+                raw_category = result.get("category", "")
+            except:
+                raw_category = response.text # JSONパース失敗時は生テキストを使う
+
+            # 強制マッチング処理
+            final_category = force_category_match(raw_category)
+            return final_category
 
         except Exception as e:
-            # 429エラー（容量オーバー）の場合は待機してリトライ
             if "429" in str(e) or "Quota" in str(e):
                 if attempt < max_retries - 1:
                     time.sleep(2 * (attempt + 1))
                     continue
-            
-            # その他のエラー、またはリトライ回数切れの場合
             print(f"API Error ({attempt}): {e}")
             
-    # 全てのリトライに失敗した場合、エラーで止めるのではなく
-    # 「（要確認）」を返して表の作成を続行させる（フェイルセーフ）
-    return "（要確認）"
+    # API自体が失敗した場合の最終手段
+    return "その他"
 
 # --- メイン処理 ---
 
 uploaded_files = st.file_uploader(" ", type="pdf", accept_multiple_files=True, key="file_uploader")
 
 if uploaded_files:
-    # モデル設定（強制JSONモード対応）
     model = genai.GenerativeModel("gemini-2.5-flash-lite")
-    
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
     
     if new_files:
@@ -1003,10 +1014,10 @@ if uploaded_files:
         for i, file in enumerate(new_files):
             status_text.text(f"処理中 ({i+1}/{len(new_files)}): {file.name}")
             
-            # 1. 局名・件名抽出（Python）
+            # 1. 局名・件名抽出
             bureau, title = parse_filename_info(file.name)
             
-            # 2. AI推論（エラーが出ても「（要確認）」として返ってくる）
+            # 2. AI推論（絶対に何かカテゴリを返す）
             category = safe_call_gemini(model, title, bureau)
             
             result_entry = {
@@ -1020,7 +1031,7 @@ if uploaded_files:
             st.session_state.processed_files.add(file.file_id)
             
             progress_bar.progress((i + 1) / len(new_files))
-            time.sleep(0.5) # 最低限の待機（API制限回避）
+            time.sleep(0.5) 
         
         status_text.text("抽出完了！")
         progress_bar.empty()
@@ -1029,7 +1040,6 @@ if st.session_state.results:
     st.markdown("### 抽出結果")
     tsv_lines = []
     for item in st.session_state.results:
-        # Excel貼り付け用にTSV作成
         line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
         tsv_lines.append(line)
     tsv_output = "\n".join(tsv_lines)
