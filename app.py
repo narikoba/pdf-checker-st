@@ -9,7 +9,7 @@ import random
 # ページ設定
 st.set_page_config(page_title="タテ表効率化くん", layout="wide")
 
-# CSS: ドラッグ＆ドロップエリアのスタイル
+# CSS: ドラッグ＆ドロップエリアをさらに大きく見やすくする
 st.markdown("""
 <style>
     div[data-testid="stFileUploader"] section {
@@ -54,7 +54,15 @@ try:
 except Exception:
     st.warning("⚠️ APIキーが設定されていません。StreamlitのSecrets設定を確認してください。")
 
-# 定数リスト（AIの回答用）
+# 定数リスト
+VALID_BUREAUS = [
+  "政策企画局", "子供政策連携室", "総務局", "財務局", "デジタルサービス局", "主税局", "生活文化局", 
+  "都民安全総合対策本部", "スポーツ推進本部", "都市整備局", "住宅政策本部", "環境局", "福祉局", 
+  "保健医療局", "産業労働局", "中央卸売市場", "スタートアップ戦略推進本部", "建設局", "港湾局", 
+  "会計管理局", "交通局", "水道局", "下水道局", "教育庁", "選挙管理委員会事務局", "人事委員会事務局", 
+  "監査事務局", "労働委員会事務局", "収用委員会事務局", "警視庁", "東京消防庁"
+]
+
 VALID_CATEGORIES = [
   "答申･報告･調査結果", "事業、計画", "会議等", "募集", "ｲﾍﾞﾝﾄ･講演", "事件･事故･処分",
   "動物", "人事･訃報･表彰", "資料", "ｺﾒﾝﾄ･声明･談話", "選挙関係", "入試関係",
@@ -63,8 +71,59 @@ VALID_CATEGORIES = [
 ]
 
 # ==========================================
-#  【重要】学習データ定義
+#  関数定義
 # ==========================================
+
+def parse_filename(filename):
+    """
+    ファイル名を解析して「局名」と「件名」を抽出する関数
+    ※AIを使わずPythonで処理するため0秒で終わります
+    """
+    # 局名の抽出: 【】で囲まれた部分
+    bureau_match = re.match(r'^【([^】]+)】', filename)
+    if bureau_match:
+        bureau = bureau_match.group(1)
+        # 局名部分を削除して残りをタイトルにする
+        title_part = re.sub(r'^【[^】]+】', '', filename)
+    else:
+        bureau = "" # 局名がない場合
+        title_part = filename
+
+    # 拡張子(.pdf)の削除
+    title = re.sub(r'\.pdf$', '', title_part, flags=re.IGNORECASE).strip()
+    
+    return bureau, title
+
+def call_gemini_text_only(model, title, bureau):
+    """
+    テキスト（件名）だけをAIに送って「区分」を判断させる関数
+    """
+    prompt = f"""
+    以下の文書タイトル（件名）と発行局名から、最も適切な「分類（Category）」を推測してJSONで出力してください。
+
+    件名: {title}
+    局名: {bureau}
+
+    【選択肢リスト】
+    {', '.join(VALID_CATEGORIES)}
+
+    【判断基準となる学習データ】
+    {TRAINING_EXAMPLES}
+
+    出力は以下のJSON形式のみにしてください（余計な解説は不要）:
+    {{ "category": "..." }}
+    """
+    
+    # テキスト生成モードで呼び出し（画像を送らないので高速・低負荷）
+    response = model.generate_content(prompt)
+    return response
+
+# ==========================================
+#  【重要】学習データ定義
+#  プログラムが読み込む順番のため、ここに配置します
+# ==========================================
+
+# ⚠️ここに以前の「TRAINING_EXAMPLES」の中身（大量のデータ）をすべて貼り付けてください
 TRAINING_EXAMPLES = """
 取材案内	（取材案内） 高円宮妃殿下「第40回東京都障害者総合美術展」お成りについて	福祉局
 取材案内	（取材案内）環境に配慮した都市農業とエシカル消費について考える「TOKYO農業フォーラム2025」の開催について	産業労働局
@@ -920,54 +979,6 @@ TRAINING_EXAMPLES = """
 """
 
 # ==========================================
-#  関数定義
-# ==========================================
-
-def parse_filename(filename):
-    """
-    ファイル名を解析して「局名」と「件名」を抽出する関数（AIを使わずPythonで処理）
-    例: 【総務局】件名です.pdf -> bureau="総務局", title="件名です"
-    """
-    # 局名の抽出: 【】で囲まれた部分
-    bureau_match = re.match(r'^【([^】]+)】', filename)
-    if bureau_match:
-        bureau = bureau_match.group(1)
-        # 局名部分を削除して残りをタイトルにする
-        title_part = re.sub(r'^【[^】]+】', '', filename)
-    else:
-        bureau = "" # 局名がない場合
-        title_part = filename
-
-    # 拡張子(.pdf)の削除
-    title = re.sub(r'\.pdf$', '', title_part, flags=re.IGNORECASE).strip()
-    
-    return bureau, title
-
-def call_gemini_text_only(model, title, bureau):
-    """
-    テキスト（件名）だけをAIに送って「区分」を判断させる関数
-    """
-    prompt = f"""
-    以下の文書タイトル（件名）と発行局名から、最も適切な「分類（Category）」を推測してJSONで出力してください。
-
-    件名: {title}
-    局名: {bureau}
-
-    【選択肢リスト】
-    {', '.join(VALID_CATEGORIES)}
-
-    【判断基準となる学習データ】
-    {TRAINING_EXAMPLES}
-
-    出力は以下のJSON形式のみにしてください（余計な解説は不要）:
-    {{ "category": "..." }}
-    """
-    
-    # テキスト生成モードで呼び出し（画像を送らないので高速・低負荷）
-    response = model.generate_content(prompt)
-    return response
-
-# ==========================================
 #  メイン処理
 # ==========================================
 
@@ -979,8 +990,8 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    # モデル準備（テキスト処理もFlashモデルが優秀・高速です）
-    model = genai.GenerativeModel("gemini-2.0-flash-lite")
+    # 【修正箇所】モデル名を指定のものに変更（gemini-2.5-flash-lite）
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
     
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
     
@@ -992,11 +1003,11 @@ if uploaded_files:
             status_text.text(f"処理中... {file.name}")
             
             try:
-                # 1. Pythonでファイル名から情報を抜き出す（0秒）
+                # 1. Pythonでファイル名から情報を抜き出す（瞬時）
                 bureau, title = parse_filename(file.name)
                 
-                # 2. AIには「件名の文字」だけを送る（画像は送らない）
-                # これにより通信量が激減し、429エラーもほぼ起きなくなります
+                # 2. AIには「件名の文字」だけを送る（PDFデータは一切読み込まない）
+                # これにより通信量が激減し、処理が爆速になります
                 response = call_gemini_text_only(model, title, bureau)
                 
                 text = response.text.strip()
@@ -1021,9 +1032,9 @@ if uploaded_files:
                 st.session_state.processed_files.add(file.file_id)
                 
             except Exception as e:
-                # エラーでも止まらず次へ（エラーログだけ表示）
-                print(f"Error: {e}")
+                # エラーでも止まらず次へ
                 # エラー時はとりあえず区分を空にして追加しておく
+                print(f"Error processing {file.name}: {e}")
                 error_entry = {
                     "fileName": file.name,
                     "bureau": bureau if 'bureau' in locals() else "",
@@ -1035,8 +1046,8 @@ if uploaded_files:
             
             # 進捗更新
             progress_bar.progress((i + 1) / len(new_files))
-            # テキストのみなのでWait時間は最小限でOK（0.2秒とかで十分）
-            time.sleep(0.2)
+            # テキストのみなのでWait時間は最小限でOK
+            time.sleep(0.1)
         
         status_text.text("抽出完了！")
         progress_bar.empty()
@@ -1083,4 +1094,3 @@ if st.session_state.results:
             "元ファイル名": st.column_config.TextColumn(width="medium"),
         }
     )
-
