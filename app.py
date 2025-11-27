@@ -1021,4 +1021,3 @@ if st.session_state.results:
             "ファイル名": st.column_config.TextColumn(width="small"),
         }
     )
-```
