@@ -7,9 +7,9 @@ st.set_page_config(page_title="PDF Bureau Extractor", layout="wide")
 
 # タイトル
 st.title("📄 PDF Title & Bureau Extractor")
-st.write("PDFをアップロードすると、AIが「局名」と「分類」を自動抽出します。")
+st.write("PDFをアップロードすると、AIが情報を抽出し、Excelに貼り付けやすい形式で出力します。")
 
-# APIキーの取得（StreamlitのSecretsから読み込む）
+# APIキーの取得
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
@@ -51,7 +51,7 @@ if uploaded_files:
         results = []
         progress_bar = st.progress(0)
         
-        # モデルの準備（指示通り gemini-2.5-flash-lite を使用）
+        # モデルの準備（gemini-2.5-flash-lite 固定）
         model = genai.GenerativeModel("gemini-2.5-flash-lite")
         
         for i, file in enumerate(uploaded_files):
@@ -74,7 +74,7 @@ if uploaded_files:
                     json_str = json_str.split("```")[1].split("```")[0]
                 
                 data = json.loads(json_str)
-                data["fileName"] = file.name # ファイル名も追加
+                data["fileName"] = file.name
                 results.append(data)
                 
             except Exception as e:
@@ -85,5 +85,32 @@ if uploaded_files:
         
         # 結果表示
         if results:
-            st.success("完了しました！")
-            st.dataframe(results, use_container_width=True)
+            st.success("完了しました！以下のボックスの右上にあるコピーボタンを押して、Excelに貼り付けてください。")
+            
+            # Excel貼り付け用データの作成（タブ区切り）
+            # 指定順序: 区分 -> 件名 -> 局名
+            tsv_lines = []
+            for item in results:
+                line = f"{item.get('category', '')}\t{item.get('title', '')}\t{item.get('bureau', '')}"
+                tsv_lines.append(line)
+            
+            tsv_output = "\n".join(tsv_lines)
+            
+            # コピー用ボックスの表示
+            st.caption("Excel貼り付け用データ（区分 / 件名 / 局名）")
+            st.code(tsv_output, language="text")
+            
+            # 念のため通常のテーブルも見やすく表示
+            st.markdown("---")
+            st.caption("抽出結果プレビュー")
+            # テーブル表示も見やすい順序に並べ替え
+            display_data = [
+                {
+                    "区分": item.get('category'),
+                    "件名": item.get('title'),
+                    "局名": item.get('bureau'),
+                    "ファイル名": item.get('fileName')
+                }
+                for item in results
+            ]
+            st.dataframe(display_data, use_container_width=True)
