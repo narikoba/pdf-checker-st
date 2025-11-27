@@ -37,7 +37,7 @@ if "results" not in st.session_state:
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 
-st.title("📄 タテ表効率化くん")
+st.title("📄 タテ表効率化くん（高精度モード）")
 
 if st.button("🗑️ 結果をリセットする"):
     st.session_state.results = []
@@ -922,49 +922,49 @@ def parse_filename_info(filename):
 
 def force_category_match(text):
     """
-    AIの回答から有効なカテゴリを無理やり探し出す関数
+    AIの回答を有効なカテゴリに強力に紐づける
     """
-    # 1. 完全一致チェック
+    # 1. 完全一致
     if text in VALID_CATEGORIES:
         return text
     
-    # 2. 部分一致チェック（リストの言葉が回答に含まれているか）
+    # 2. 部分一致（AIの回答の中にリストの言葉が含まれているか）
     for cat in VALID_CATEGORIES:
         if cat in text:
             return cat
             
-    # 3. 逆方向の部分一致（回答がリストの言葉の一部か：例 AI「イベント」→ リスト「イベント・講演」）
+    # 3. 逆方向の部分一致（回答がリストの言葉の一部か）
     for cat in VALID_CATEGORIES:
-        # 記号などを除いて比較
         simple_cat = cat.replace("･", "").replace("・", "").replace("、", "")
         simple_text = text.replace("･", "").replace("・", "").replace("、", "")
         if simple_text in simple_cat and len(simple_text) > 1:
             return cat
 
-    # 4. どうしてもわからなければ「その他」に逃げる（要確認とは言わない）
-    return "その他"
+    # 4. マッチしなければ元のテキストを返す（"その他"には逃げない）
+    return text
 
 def safe_call_gemini(model, title, bureau):
     """
-    JSONモードで推論し、失敗しても強制的にカテゴリを割り当てる
+    高精度モデルで推論し、JSONで受け取る
     """
     prompt = f"""
-    You are a document classifier.
-    Classify the document into one of the categories below based on the Title and Bureau.
+    You are an expert document classifier for the Tokyo Metropolitan Government.
+    Your task is to categorize the document into exactly one of the defined categories based ONLY on its Title and Bureau.
 
     Title: {title}
     Bureau: {bureau}
 
-    Candidate Categories:
+    Candidate Categories (Choose one from this list ONLY):
     {', '.join(VALID_CATEGORIES)}
 
-    Reference Examples:
+    Reference Examples (Use these to learn the patterns):
     {TRAINING_EXAMPLES}
 
-    Instructions:
-    1. Select the BEST category from the list.
-    2. If unsure, choose the closest one or "その他".
-    3. Output ONLY a valid JSON object.
+    Rules:
+    1. Analyze the keywords in the Title carefully.
+    2. Compare with the Reference Examples to find the closest semantic match.
+    3. Do NOT choose "その他" (Other) unless it is absolutely impossible to categorize. Try to find a specific category.
+    4. Do NOT output the reasoning, only the JSON.
 
     Output Schema:
     {{ "category": "YOUR_SELECTED_CATEGORY" }}
@@ -978,25 +978,28 @@ def safe_call_gemini(model, title, bureau):
                 generation_config={"response_mime_type": "application/json"}
             )
             
-            # JSON解析
             try:
                 result = json.loads(response.text)
                 raw_category = result.get("category", "")
             except:
-                raw_category = response.text # JSONパース失敗時は生テキストを使う
+                raw_category = response.text
 
-            # 強制マッチング処理
+            # 強制マッチング
             final_category = force_category_match(raw_category)
+            
+            # もしマッチング処理を通してもリストにない言葉（空文字など）なら、リトライさせる
+            if final_category not in VALID_CATEGORIES and attempt < max_retries - 1:
+                continue
+                
             return final_category
 
         except Exception as e:
             if "429" in str(e) or "Quota" in str(e):
                 if attempt < max_retries - 1:
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(3 * (attempt + 1)) # 待機時間を長めに
                     continue
             print(f"API Error ({attempt}): {e}")
             
-    # API自体が失敗した場合の最終手段
     return "その他"
 
 # --- メイン処理 ---
@@ -1004,7 +1007,9 @@ def safe_call_gemini(model, title, bureau):
 uploaded_files = st.file_uploader(" ", type="pdf", accept_multiple_files=True, key="file_uploader")
 
 if uploaded_files:
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    # 指定されたモデル名（絶対的な正）
+    model = genai.GenerativeModel("gemini-2.5-flash-preview-09-2025")
+    
     new_files = [f for f in uploaded_files if f.file_id not in st.session_state.processed_files]
     
     if new_files:
@@ -1017,7 +1022,7 @@ if uploaded_files:
             # 1. 局名・件名抽出
             bureau, title = parse_filename_info(file.name)
             
-            # 2. AI推論（絶対に何かカテゴリを返す）
+            # 2. AI推論
             category = safe_call_gemini(model, title, bureau)
             
             result_entry = {
@@ -1031,7 +1036,9 @@ if uploaded_files:
             st.session_state.processed_files.add(file.file_id)
             
             progress_bar.progress((i + 1) / len(new_files))
-            time.sleep(0.5) 
+            
+            # 正確さ優先のため、少し長めの待機時間を入れる
+            time.sleep(1.5)
         
         status_text.text("抽出完了！")
         progress_bar.empty()
